@@ -106,10 +106,36 @@ def apply_application_tab_patch(content):
     content = must_replace(
         content,
         'var MOb=({title:a="Notifications"})=>{var b=sd().core.notificationService,c=(0,E.useCallback)(async()=>{var d=e,f=e;try{f(await d(b.openPreferences()))}finally{d()}},[b]);',
-        'var MOb=({title:a="Notifications"})=>{var b=sd().core.notificationService,c=(0,E.useCallback)(async()=>{try{if(window.Android&&typeof window.Android.openAppSettings==="function"){window.Android.openAppSettings();return}}catch(_e){}var d=e,f=e;try{f(await d(b.openPreferences()))}finally{d()}},[b]);',
+        'var MOb=({title:a="Notifications"})=>{var b=sd().core.notificationService,c=(0,E.useCallback)(async()=>{try{if(window.Android&&typeof window.Android.openNotificationSettings==="function"){window.Android.openNotificationSettings();return}if(window.Android&&typeof window.Android.openAppSettings==="function"){window.Android.openAppSettings();return}}catch(_e){}var d=e,f=e;try{f(await d(b.openPreferences()))}finally{d()}},[b]);',
         "app_notifications_android_settings",
     )
     return content
+
+
+def apply_native_notifications_patch(content):
+    changed = False
+
+    old_mob_v1 = (
+        'var MOb=({title:a="Notifications"})=>{var b=sd().core.notificationService,c=(0,E.useCallback)(async()=>{try{if(window.Android&&typeof window.Android.openAppSettings==="function"){window.Android.openAppSettings();return}}catch(_e){}var d=e,f=e;try{f(await d(b.openPreferences()))}finally{d()}},[b]);'
+    )
+    new_mob_v2 = (
+        'var MOb=({title:a="Notifications"})=>{var b=sd().core.notificationService,c=(0,E.useCallback)(async()=>{try{if(window.Android&&typeof window.Android.openNotificationSettings==="function"){window.Android.openNotificationSettings();return}if(window.Android&&typeof window.Android.openAppSettings==="function"){window.Android.openAppSettings();return}}catch(_e){}var d=e,f=e;try{f(await d(b.openPreferences()))}finally{d()}},[b]);'
+    )
+    if new_mob_v2 not in content and old_mob_v1 in content:
+        content = must_replace(content, old_mob_v1, new_mob_v2, "app_notifications_android_settings_v2")
+        changed = True
+
+    old_fjd = (
+        'async openPreferences(){if(this.bridge)return this.bridge.openSystemPreferences();throw Error("Missing notifications functionality");}async clearNotifications(){}}'
+    )
+    new_fjd = (
+        'async openPreferences(){if(this.bridge)return this.bridge.openSystemPreferences();throw Error("Missing notifications functionality");}async requestPermission(){return this.bridge?.requestPermission?this.bridge.requestPermission():void 0}async clearNotifications(a){if(this.bridge?.clear&&a)return this.bridge.clear(a)}}'
+    )
+    if new_fjd not in content:
+        content = must_replace(content, old_fjd, new_fjd, "fJd_requestPermission_and_clearNotifications")
+        changed = True
+
+    return content, changed
 
 
 def patch_main(file_path):
@@ -121,7 +147,13 @@ def patch_main(file_path):
         content = f.read()
 
     if "Android.getTheme" in content and "__agMpSmartV3" in content and "__AgRootEB" in content and "agy-application-settings-anchor" in content:
-        print("[web-patch-2.34.0] main.js already patched (v2.34.0 Android UI + Application Tab + Smart Marketplace V3 + RootEB)")
+        content, notif_changed = apply_native_notifications_patch(content)
+        if notif_changed:
+            with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            print("[web-patch-2.34.0] Applied native notifications polish patch to main.js")
+        else:
+            print("[web-patch-2.34.0] main.js already patched (v2.34.0 Android UI + Application Tab + Smart Marketplace V3 + RootEB + Native Notifications)")
         return True
 
     # 1a. Z0() system theme resolver via window.Android.getTheme()
@@ -479,6 +511,7 @@ def patch_main(file_path):
     )
     content = must_replace(content, old_root_render, new_root_render, "root_error_boundary")
     content = apply_application_tab_patch(content)
+    content, _ = apply_native_notifications_patch(content)
 
     assert "Desktop Mode" not in content, "Desktop Mode must not be present in Android main.js"
 

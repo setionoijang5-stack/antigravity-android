@@ -209,6 +209,52 @@ public final class AndroidBridge {
     }
 
     @JavascriptInterface
+    public boolean postAgentNotificationAuth(String authToken, String title, String message,
+                                             String tag, String cascadeId, boolean silent) {
+        if (!isAuthorized(authToken)) return false;
+        return notification.postAgent(title, message, tag, cascadeId, silent);
+    }
+
+    @JavascriptInterface
+    public boolean cancelCascadeNotificationsAuth(String authToken, String cascadeId) {
+        if (!isAuthorized(authToken)) return false;
+        return notification.cancelForCascade(cascadeId);
+    }
+
+    @JavascriptInterface
+    public String getNotificationPermissionStatus() {
+        try {
+            MainActivity act = MainActivity.activeActivity;
+            Context ctx = act != null ? act : appContext;
+            if (ctx == null) return "denied";
+            if (NotificationBridge.areNotificationsPermitted(ctx)) {
+                return "granted";
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                return "not-determined";
+            }
+            return "denied";
+        } catch (Throwable t) {
+            return "denied";
+        }
+    }
+
+    @JavascriptInterface
+    public void requestNotificationPermissionAuth(String authToken, final String callbackId) {
+        if (!isAuthorized(authToken)) return;
+        MainActivity act = MainActivity.activeActivity;
+        if (act != null) {
+            act.requestNotificationPermissionFromJs(callbackId);
+        }
+    }
+
+    @JavascriptInterface
+    public void openNotificationSettingsAuth(String authToken) {
+        if (!isAuthorized(authToken)) return;
+        NotificationBridge.openNotificationSettings(appContext);
+    }
+
+    @JavascriptInterface
     public void saveBlobAuth(String authToken, String base64Data, String filename, String mimeType) {
         if (!isAuthorized(authToken)) return;
         if (MainActivity.activeActivity != null) {

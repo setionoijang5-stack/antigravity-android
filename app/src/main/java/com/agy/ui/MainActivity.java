@@ -55,6 +55,7 @@ public class MainActivity extends Activity
     private static final int REQUEST_AUDIO_PERMISSION = 1003;
     private static final int REQUEST_BACKUP_EXPORT = 1004;
     private static final int REQUEST_BACKUP_RESTORE = 1005;
+    private static final int REQUEST_NOTIFICATION_PERMISSION = 1006;
     private static final long SPLASH_TIMEOUT_MS = 45000;
     private static final long POLL_INTERVAL_MS = 50;
 
@@ -63,6 +64,9 @@ public class MainActivity extends Activity
     private ValueCallback<Uri[]> filePathCallback;
     private android.webkit.PermissionRequest pendingWebPermissionRequest;
     private String pendingMicJsCallbackId;
+    private String pendingNotificationJsCallbackId;
+    private String pendingNotificationCascadeId;
+    private boolean uiReady = false;
     private boolean startupAudioPermissionRequested = false;
     private boolean notificationPermissionSynced = false;
 
@@ -113,6 +117,7 @@ public class MainActivity extends Activity
                 if (generation > 1) {
                     splash.showLoading();
                 }
+                uiReady = false;
                 webViewHost.loadApp();
                 handler.postDelayed(new Runnable() {
                     @Override
@@ -175,6 +180,7 @@ public class MainActivity extends Activity
 
         handler.postDelayed(pollServer, 30);
         handleUpdateNotificationIntent(getIntent());
+        handleNotificationClickIntent(getIntent());
     }
 
     private void startCoreService() {
@@ -194,6 +200,7 @@ public class MainActivity extends Activity
     /** Retry re-runs install + start: stop the service, then start it again. */
     private void retryCore() {
         splash.clearFatal();
+        uiReady = false;
         appLoaded = false;
         loadedGeneration = -1;
         splashDeadline = System.currentTimeMillis() + SPLASH_TIMEOUT_MS;
@@ -238,7 +245,9 @@ public class MainActivity extends Activity
     /** Idempotent; called by AndroidBridge.onUiReady() on the main thread. */
     public void dismissSplash() {
         Log.i(TAG, "dismissSplash: fading out splashView (280ms)");
+        uiReady = true;
         splash.dismiss();
+        flushPendingNotificationClick();
     }
 
     public boolean isDesktopMode() {
@@ -313,6 +322,7 @@ public class MainActivity extends Activity
             pendingWebPermissionRequest = null;
         }
         pendingMicJsCallbackId = null;
+        pendingNotificationJsCallbackId = null;
         if (androidBridge != null) {
             androidBridge.setActivity(null);
         }
@@ -334,6 +344,7 @@ public class MainActivity extends Activity
         super.onNewIntent(intent);
         setIntent(intent);
         handleUpdateNotificationIntent(intent);
+        handleNotificationClickIntent(intent);
     }
 
     @Override
@@ -658,9 +669,93 @@ public class MainActivity extends Activity
         });
     }
 
+    private void handleNotificationClickIntent(Intent intent) {
+        if (intent == null) return;
+        String cascadeId = intent.getStringExtra(
+                com.agy.bridge.NotificationBridge.EXTRA_NOTIFICATION_CASCADE_ID);
+        if (cascadeId == null) return;
+        intent.removeExtra(com.agy.bridge.NotificationBridge.EXTRA_NOTIFICATION_CASCADE_ID);
+        cascadeId = cascadeId.trim();
+        if (!com.agy.bridge.NotificationBridge.isValidCascadeId(cascadeId)) return;
+        pendingNotificationCascadeId = cascadeId;
+        // Also clear any sibling notifications for this conversation on tap
+        com.agy.bridge.NotificationBridge.cancelLocalForCascade(this, cascadeId);
+        if (uiReady) {
+            flushPendingNotificationClick();
+        }
+    }
+
+    private void flushPendingNotificationClick() {
+        final String cascadeId = pendingNotificationCascadeId;
+        if (cascadeId == null || !uiReady) return;
+        final WebView wv = getWebView();
+        if (wv == null) return;
+        pendingNotificationCascadeId = null;
+        handler.post(() -> {
+            try {
+                wv.evaluateJavascript(
+                        "window.__agOnNotificationClicked&&window.__agOnNotificationClicked({cascadeId:"
+                                + org.json.JSONObject.quote(cascadeId) + "});",
+                        null);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    public void requestNotificationPermissionFromJs(final String callbackId) {
+        handler.post(() -> {
+            if (com.agy.bridge.NotificationBridge.areNotificationsPermitted(this)) {
+                resolveNotificationPermissionCallback(callbackId, "granted");
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED) {
+                this.pendingNotificationJsCallbackId = callbackId;
+                try {
+                    requestPermissions(
+                            new String[]{"android.permission.POST_NOTIFICATIONS"},
+                            REQUEST_NOTIFICATION_PERMISSION);
+                } catch (Throwable t) {
+                    this.pendingNotificationJsCallbackId = null;
+                    resolveNotificationPermissionCallback(callbackId, "denied");
+                }
+            } else {
+                // Notifications disabled at OS level (API < 33 or channel/app blocked)
+                resolveNotificationPermissionCallback(callbackId, "denied");
+            }
+        });
+    }
+
+    private void resolveNotificationPermissionCallback(final String callbackId, final String status) {
+        if (callbackId == null || webViewHost == null || webViewHost.getWebView() == null) {
+            return;
+        }
+        handler.post(() -> {
+            try {
+                webViewHost.getWebView().evaluateJavascript(
+                        "window.__agResolveNotificationPermission&&window.__agResolveNotificationPermission("
+                                + org.json.JSONObject.quote(callbackId) + ","
+                                + org.json.JSONObject.quote(status) + ");",
+                        null);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_NOTIFICATION_PERMISSION) {
+            syncForegroundNotificationIfPermitted();
+            boolean granted = com.agy.bridge.NotificationBridge.areNotificationsPermitted(this);
+            String cbId = this.pendingNotificationJsCallbackId;
+            this.pendingNotificationJsCallbackId = null;
+            if (cbId != null) {
+                resolveNotificationPermissionCallback(cbId, granted ? "granted" : "denied");
+            }
+            return;
+        }
         if (requestCode == REQUEST_AUDIO_PERMISSION) {
             syncForegroundNotificationIfPermitted();
             boolean granted = false;
